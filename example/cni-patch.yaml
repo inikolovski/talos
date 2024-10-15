@@ -1,0 +1,31 @@
+machine:
+  network:
+    ## List of name servers.
+    ## I use an internal recursor
+    nameservers:
+      - 10.100.1.1
+  time:
+    servers:
+      - time.google.com 
+  install:
+    ## Override /dev/sda (default) to /dev/vda (needed for kvm vm)
+    disk: /dev/vda
+cluster:
+  network:
+    ## disable default cni
+    cni:
+      name: none
+    ## subnet for pods
+    podSubnets:
+      - 10.17.0.0/17
+    # subnet for services
+    serviceSubnets:
+      - 10.17.128.0/17
+  ## disable kube proxy deploy (replaced with cilium/eBPF)
+  proxy:
+    disabled: true
+  ## inline the generated cilium helm template
+  inlineManifests:
+    - name: cilium
+      contents: |
+        # <content cilium.yaml, indented here>

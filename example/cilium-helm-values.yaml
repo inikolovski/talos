@@ -1,0 +1,69 @@
+---
+
+
+bandwidthManager:
+  enabled: true
+  bbr: true
+
+# For the BGP load balancer IP announce
+bgpControlPlane:
+  enabled: true
+
+# Set bpf options
+bpf:
+  masquerade: true
+  preallocateMaps: true
+  tproxy: true
+
+bpfClockProbe: true
+
+# for cluster mesh at a later date
+cluster:
+  name: talos1
+  id: 1
+
+# IP address management
+ipam:
+  mode: kubernetes
+
+# Talos has enabled KubePrism by default on port 7445
+k8sServiceHost: localhost
+k8sServicePort: "7445"
+
+# Replace the kube proxy with cilium/eBPF
+kubeProxyReplacement: true
+
+# prometheus metrics
+kubeProxyReplacementHealthzBindAddr: "0.0.0.0:10256"
+operator:
+  prometheus:
+    enabled: true
+prometheus:
+  enabled: true
+
+# From the Talos documentation for Cilium
+securityContext:
+  capabilities:
+    ciliumAgent: [CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID]
+    cleanCiliumState: [NET_ADMIN,SYS_ADMIN,SYS_RESOURCE]
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+# L8 problem with configuring L1-3 might be solved.
+routingMode: native
+# The subnet where the nodes have their internal IP
+ipv4NativeRoutingCIDR: "10.100.0.0/16"
+autoDirectNodeRoutes: true
+
+# Native Routing seems to be working
+# Try out XDP NodePort/LoadBalancer accelleration in hybrid mode (DSR for TCP, SNAT for UDP)
+loadBalancer:
+  acceleration: native
+  mode: hybrid
+  # Maglev consistent hashing
+  algorithm: maglev
+maglev:
+  tableSize: 131071
+  hashSeed: uj2vE4Xe1u6xMsRt

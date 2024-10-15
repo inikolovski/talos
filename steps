@@ -1,0 +1,349 @@
+
+# production cluster:
+
+# setup the machines/nodes/network with Terraform
+# > Grab mac addressess, IP's, hostnames
+
+
+
+# > DHCP should be set up. Preferrably DNS as well.
+```
+option domain-name "talos.hel6.net";
+option domain-name-servers 10.100.1.1, 10.100.1.2, 10.100.0.86;
+option routers 10.100.1.1;
+option time-servers intp.true.nl;
+
+default-lease-time 600;
+max-lease-time 7200;
+
+# For which network
+subnet 10.100.0.0 netmask 255.255.0.0 {
+  # Split the range (/24) into 2 subnets (/25) so no overlap between static and dynamic assignment
+  range 10.100.17.128 10.100.17.255;
+}
+
+# control plane
+host c1-talos {
+  hardware ethernet 22:54:00:A2:52:4C;
+  fixed-address 10.100.17.1;
+}
+host c2-talos {
+  hardware ethernet 22:54:00:CE:E9:E2;
+  fixed-address 10.100.17.2;
+}
+host c3-talos {
+  hardware ethernet 22:54:00:16:AC:24;
+  fixed-address 10.100.17.3;
+}
+
+# workers
+host w1-talos {
+  hardware ethernet 22:54:00:C6:3A:D6;
+  fixed-address 10.100.17.11;
+}
+host w2-talos {
+  hardware ethernet 22:54:00:52:4B:35;
+  fixed-address 10.100.17.12;
+}
+host w3-talos {
+  hardware ethernet 22:54:00:72:40:94;
+  fixed-address 10.100.17.13;
+}
+```
+
+
+# Dedicated load balancer (HA) for kube api
+# > Create a simple HAProxy setup. With keepalived VIP or using DNS loadbalancing
+
+Keepalived VRRP Instance example:
+```
+vrrp_instance kube_api {
+    interface enp1s0
+    state MASTER
+    priority 200
+    virtual_router_id 17 
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass kK8s8eRU
+    }
+
+    virtual_ipaddress {
+        10.100.17.0
+    }
+
+}
+```
+
+
+# HAProxy example:
+```
+defaults
+    log     global
+    maxconn 20000
+    mode    tcp
+    option  dontlognull
+    timeout http-request 10s
+    timeout queue        1m
+    timeout connect      10s
+    timeout client       86400s
+    timeout server       86400s
+    timeout tunnel       86400s
+
+frontend talos-kube-apiserver
+  bind 10.100.17.0:6443
+  mode tcp
+  option tcplog
+  default_backend talos-kube-apiserver
+
+backend talos-kube-apiserver
+  option tcp-check
+  option tcplog
+  mode tcp
+  balance roundrobin
+  default-server verify none check-ssl inter 10s downinter 5s rise 2 fall 2 slowstart 60s maxconn 5000 maxqueue 5000 weight 100
+
+  server c1.talos 10.100.17.1:6443 check
+  server c2.talos 10.100.17.2:6443 check
+  server c3.talos 10.100.17.3:6443 check
+```
+
+
+# > We will be using Cilium CNI. Needs some preparation. Generate helm template to include in the "cni-patch.yml" later
+
+# Install Cilium helm repo
+helm repo add cilium https://helm.cilium.io/
+
+# Update repo
+helm repo update cilium
+
+# Nice way to check which values are available
+helm show values cilium/cilium --version 1.16.3
+
+
+# Create a helm values file (adjust to your needs)
+
+# cilium-helm-values.yaml:
+```
+---
+
+
+bandwidthManager:
+  enabled: true
+  bbr: true
+
+# For the BGP load balancer IP announce
+bgpControlPlane:
+  enabled: true
+
+# Set bpf options
+bpf:
+  masquerade: true
+  preallocateMaps: true
+  tproxy: true
+
+bpfClockProbe: true
+
+# for cluster mesh at a later date
+cluster:
+  name: talos1
+  id: 1
+
+# IP address management
+ipam:
+  mode: kubernetes
+
+# Talos has enabled KubePrism by default on port 7445
+k8sServiceHost: localhost
+k8sServicePort: "7445"
+
+# Replace the kube proxy with cilium/eBPF
+kubeProxyReplacement: true
+
+# prometheus metrics
+kubeProxyReplacementHealthzBindAddr: "0.0.0.0:10256"
+operator:
+  prometheus:
+    enabled: true
+prometheus:
+  enabled: true
+
+# From the Talos documentation for Cilium
+securityContext:
+  capabilities:
+    ciliumAgent: [CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID]
+    cleanCiliumState: [NET_ADMIN,SYS_ADMIN,SYS_RESOURCE]
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+# L8 problem with configuring L1-3 might be solved.
+routingMode: native
+# The subnet where the nodes have their internal IP
+ipv4NativeRoutingCIDR: "10.100.0.0/16"
+autoDirectNodeRoutes: true
+
+# Native Routing seems to be working
+# Try out XDP NodePort/LoadBalancer accelleration in hybrid mode (DSR for TCP, SNAT for UDP)
+loadBalancer:
+  acceleration: native
+  mode: hybrid
+  # Maglev consistent hashing
+  algorithm: maglev
+maglev:
+  tableSize: 131071
+  hashSeed: uj2vE4Xe1u6xMsRt
+
+```
+
+
+
+# Generate Cilium manifests:
+helm template cilium cilium/cilium --version 1.16.3 --namespace kube-system -f cilium-helm-values.yaml > cilium.yaml
+
+
+# create the cni-patch.yml (also added some overrides for virtual disk name, nameservers and timeserver):
+```
+machine:
+  network:
+    ## List of name servers.
+    ## I use an internal recursor
+    nameservers:
+      - 10.100.1.1
+  time:
+    servers:
+      - time.google.com
+  install:
+    ## Override /dev/sda (default) to /dev/vda (needed for kvm vm)
+    disk: /dev/vda
+
+cluster:
+  network:
+
+    ## disable default cni
+    cni:
+      name: none
+
+    ## subnet for pods
+    podSubnets:
+      - 10.17.0.0/17
+
+    # subnet for services
+    serviceSubnets:
+      - 10.17.128.0/17
+
+  ## disable kube proxy deploy (replaced with cilium/eBPF)
+  proxy:
+    disabled: true
+
+  ## inline the generated cilium helm template
+  inlineManifests:
+    - name: cilium
+      contents: |
+        # <content cilium.yaml, indented here>
+```
+
+
+# > TALOS finally
+
+# Make sure you use the latest talosctl
+rm /usr/local/bin/talosctl
+curl -sL https://talos.dev/install | sh
+
+
+# Generate secrets bundle (can be done in the generate config but I prefer to do it seperate):
+talosctl gen secrets -o secrets.yaml
+
+
+# Generate the talos config, patch it with previously created "cni-patch.yaml"
+talosctl gen config \
+  --with-secrets secrets.yaml \
+  --config-patch @cni-patch.yaml \
+  talos1 \
+  https://10.100.17.0:6443
+
+
+# Apply control plane config (with strategic config patch per machine)
+talosctl apply-config --insecure \
+    --nodes 10.100.17.1 \
+    --config-patch @machines/c1.yaml \
+    --file controlplane.yaml
+
+talosctl apply-config --insecure \
+    --nodes 10.100.17.2 \
+    --config-patch @machines/c2.yaml \
+    --file controlplane.yaml
+
+talosctl apply-config --insecure \
+    --nodes 10.100.17.3 \
+    --config-patch @machines/c3.yaml \
+    --file controlplane.yaml
+
+
+# Apply worker node config (with strategic config patch per machine)
+talosctl apply-config --insecure \
+    --nodes 10.100.17.11 \
+    --config-patch @machines/w1.yaml \
+    --file worker.yaml
+
+talosctl apply-config --insecure \
+    --nodes 10.100.17.12 \
+    --config-patch @machines/w2.yaml \
+    --file worker.yaml
+
+talosctl apply-config --insecure \
+    --nodes 10.100.17.13 \
+    --config-patch @machines/w3.yaml \
+    --file worker.yaml
+
+
+
+# Wait couple of minutes for the nodes to get installed
+
+
+
+# check control plane nodes
+talosctl --talosconfig=./talosconfig \
+    --nodes 10.100.17.1 -e 10.100.17.1 version
+talosctl --talosconfig=./talosconfig \
+    --nodes 10.100.17.2 -e 10.100.17.2 version
+talosctl --talosconfig=./talosconfig \
+    --nodes 10.100.17.3 -e 10.100.17.3 version
+
+# check worker nodes
+talosctl --talosconfig=./talosconfig \
+    --nodes 10.100.17.11 -e 10.100.17.11 version
+talosctl --talosconfig=./talosconfig \
+    --nodes 10.100.17.12 -e 10.100.17.12 version
+talosctl --talosconfig=./talosconfig \
+    --nodes 10.100.17.13 -e 10.100.17.13 version
+
+
+
+# bootstrap c1 (only one control plane node should be bootstrapped. Rest will follow the leader)
+talosctl bootstrap --nodes 10.100.17.1 -e 10.100.17.1 --talosconfig=./talosconfig
+
+
+
+# Wait couple of minutes for the bootstrap to complete
+
+
+
+# get alternative (kube) config so it doens't merge with my own
+talosctl kubeconfig alternative-kubeconfig --nodes 10.100.17.1 -e 10.100.17.1 --talosconfig=./talosconfig
+
+
+# Check node availability
+kubectl --kubeconfig alternative-kubeconfig get nodes -o wide
+
+
+# Check cilium status
+kubectl --kubeconfig alternative-kubeconfig exec -it  ds/cilium -n kube-system -- cilium status --verbose
+
+
+# Check if coreDNS is working
+kubectl --kubeconfig alternative-kubeconfig get pods -n kube-system --selector k8s-app=kube-dns
+
+
